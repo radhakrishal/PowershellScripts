@@ -1,0 +1,23 @@
+$servers = @(get-content "d:\serverlist\servers.txt" -TotalCount 500)
+ForEach($server in $servers)
+{
+$Users = Invoke-Command -ScriptBlock { quser } -ComputerName $server
+$Users = $Users | ForEach-Object {
+    (($_.trim() -replace ">" -replace "(?m)^([A-Za-z0-9]{3,})\s+(\d{1,2}\s+\w+)", '$1  none  $2' -replace "\s{2,}", "," -replace "none", $null))
+} | ConvertFrom-Csv
+
+foreach ($User in $Users)
+{
+$u = $User.USERNAME
+#echo $u
+$s = $User.STATE.Replace("Disc", "Disconnected")
+#echo $s
+$i = $User.ID
+
+if ($u -like "*sa*")
+{
+rwinsta $i /server:$server
+}
+} 
+}
+
