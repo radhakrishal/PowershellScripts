@@ -1,0 +1,153 @@
+$servers = invoke-sqlcmd -ServerInstance "InstanceName" -Database INVENTORYDB -Query "select distinct serverfrominstancename,instancefrominstancename,portnumber from INVENTORYDBinstance where operationalStatus not in ('retired')" -TrustServerCertificate
+
+
+$batch = invoke-sqlcmd -ServerInstance InstanceName -Database "DESTINATIONDB" -Query "select count(batch) cnt from logininfo" -TrustServerCertificate
+$btchcnt = $batch.cnt
+Write-Host $btchcnt
+if ($btchcnt -eq 0)
+{
+$btchid = 1
+}
+else
+{
+$batch1 = invoke-sqlcmd -ServerInstance InstanceName -Database "DESTINATIONDB" -Query "select top 1 batch cnt1 from logininfo order by timestamp desc" -TrustServerCertificate
+$btchcnt1 = $batch1.cnt1
+$btchcnt1 = [int]$btchcnt1
+$btchid = $btchcnt1 + 1
+}
+Write-Host $btchid
+ForEach($server in $servers)
+{
+$srv = $server.serverfrominstancename #servername from the select query
+$port = $server.portnumber #port from the select query
+$instance = $server.instancefrominstancename
+if ($instance -eq 'default')
+{
+$serverinstance = $srv
+}
+else
+{
+$serverinstance = $srv + "\" + $instance
+}
+$conport = $srv + "," + $port
+$servers = invoke-sqlcmd -ServerInstance $conport -Database master -Query "select @@version" -TrustServerCertificate
+if ($? -eq 'true')
+{
+write-host "True"
+Invoke-Sqlcmd -ServerInstance $conport -Database master -Query "
+
+
+--select * from sys.server_principals
+--select * from sys.server_role_members
+
+select $($btchid) as batch,CURRENT_TIMESTAMP as Timestamp,
+'MSSQL' as PlatformName,
+ServerProperty('MachineName') as ServerName,
+@@servername as InstanceName,
+'Success' as Connection,
+a.name as Name,
+convert(varchar(100),a.createdate) as createdate,
+convert(varchar(100),a.updatedate) as updatedate,
+isnull(DB_Roles.Roles,'Public') as Role,
+case
+when convert(varchar(100),c.is_disabled) = 0 then 'Active'
+else
+'Disabled'
+end as State_Desc,
+isNull(LOGINPROPERTY(a.name, N'isLocked'),'N/A') as islocked,
+case
+when Year(convert(datetime,LOGINPROPERTY(a.name, N'LockoutTime'))) < 1901 then 'N/A'
+else
+isNull(LOGINPROPERTY(a.name,'lockouttime'),'N/A') 
+end 
+as LockoutTime ,
+case
+when isntname = 1 then 'Windows Account'
+else
+'SQL Account'
+end as LoginType,
+isNull(convert(varchar(100),b.is_policy_checked),'N/A') as 'PolicyEnforced',
+isNull(convert(varchar(100),b.is_expiration_checked),'N/A') as 'PasswordExpirationEnforced',
+convert(varchar(100),a.denylogin) as denyLogin,
+convert(varchar(100),a.hasaccess) as hasAccess,
+'instance level logins cannot have a server role above public' as Sec_Category
+from syslogins a left outer join sys.sql_logins b 
+on
+a.sid = b.sid 
+left outer join sys.server_principals c
+on a.name = c.name
+left join
+(
+select 'sysadmin' as Roles
+union all 
+select 'securityadmin' 
+union all 
+select 'serveradmin' 
+union all 
+select 'setupadmin' 
+union all 
+select 'processadmin' 
+union all 
+select 'diskadmin' 
+union all 
+select 'dbcreator' 
+union all 
+select 'bulkadmin' 
+union all 
+select 'No serverRole' 
+union all
+select 'public'
+) DB_Roles 
+on 
+Case When a.sysadmin=1 and DB_Roles.Roles='sysadmin' then 'sysadmin' 
+	When a.securityadmin=1 and DB_Roles.Roles='securityadmin' then 'securityadmin'
+	When a.serveradmin=1 and DB_Roles.Roles='serveradmin' then 'serveradmin' 
+	When a.setupadmin=1 and DB_Roles.Roles='setupadmin' then 'setupadmin' 
+	When a.processadmin=1 and DB_Roles.Roles='processadmin' then 'processadmin' 
+	When a.diskadmin=1 and DB_Roles.Roles='diskadmin' then 'diskadmin' 
+	When a.dbcreator=1 and DB_Roles.Roles='dbcreator' then 'dbcreator'  
+	When a.bulkadmin=1 and DB_Roles.Roles='bulkadmin' then 'bulkadmin' 
+	else null end=DB_Roles.Roles
+	
+UNION
+
+SELECT $($btchid),CURRENT_TIMESTAMP as Timestamp,
+'MSSQL' as PlatformName,
+ServerProperty('MachineName') as ServerName,
+@@servername as InstanceName,
+'Success' as Connection,
+SP.name as Name,
+'N/A' as createdate,
+'N/A' as updatedate,
+SUSER_NAME(role_principal_id) Role,
+'N/A' as state_desc,
+'N/A' as islocked,
+'N/A' as lockouttime,
+'N/A' as LoginType,
+'N/A' as PolicyEnforced,
+'N/A' as PasswordExpirationEnforced,
+'N/A' as DenyLogin,
+'N/A' as hasAccess,
+'instance level logins cannot have a server role above public' as Sec_Category
+
+FROM sys.server_principals AS SP
+LEFT JOIN sys.server_role_members AS RM ON SP.principal_id = RM.member_principal_id
+where type in ('S','C','U','G') and SUSER_NAME(role_principal_id) not in
+('sysadmin',
+'securityadmin',
+'serveradmin',
+'setupadmin',
+'processadmin',
+'diskadmin',
+'dbcreator',
+'bulkadmin')" -TrustServerCertificate -OutputAs DataTables |        
+Write-SqlTableData -ServerInstance InstanceName -DatabaseName DESTINATIONDB -SchemaName ssrs -TableName logininfo -force  
+}
+else
+{
+Invoke-SqlCmd -ServerInstance "InstanceName" -Database "DESTINATIONDB" -Query "insert into logininfo values($($btchid),current_timestamp,'MSSQL','$($srv)','$($serverinstance)','Failed',NULL,NULL,NULL,NULL,NULL,NULL,NULL,NULL,NULL,NULL,NULL,NULL,NULL)" -TrustServerCertificate
+}
+}
+Invoke-Sqlcmd -ServerInstance "InstanceName" -Database "DESTINATIONDB" -Query "insert into logininfo_archive_2022_2 select * from logininfo where batch = $($btchcnt1)" -TrustServerCertificate
+Invoke-Sqlcmd -ServerInstance "InstanceName" -Database "DESTINATIONDB" -Query "delete from logininfo where batch != $($btchid)" -TrustServerCertificate
+
